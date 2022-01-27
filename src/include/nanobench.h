@@ -3287,10 +3287,10 @@ std::vector<BigO> Bench::complexityBigO() const {
         return n;
     });
     bigOs.emplace_back("O(log n)", rangeMeasure, [](double n) {
-        return std::log2(n);
+        return log2(n);
     });
     bigOs.emplace_back("O(n log n)", rangeMeasure, [](double n) {
-        return n * std::log2(n);
+        return n * log2(n);
     });
     bigOs.emplace_back("O(n^2)", rangeMeasure, [](double n) {
         return n * n;
