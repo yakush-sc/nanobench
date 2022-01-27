@@ -34,7 +34,7 @@ TEST_CASE("tutorial_complexity_sort") {
 
     // calculates bigO for a custom function
     auto logLogN = bench.complexityBigO("O(log log n)", [](double n) {
-        return std::log2(std::log2(n));
+        return log2(log2(n));
     });
     std::cout << logLogN << std::endl;
 }
