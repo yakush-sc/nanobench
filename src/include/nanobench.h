@@ -2335,6 +2335,10 @@ void IterationLogic::moveResultTo(std::vector<Result>& results) noexcept {
 
 #    if ANKERL_NANOBENCH(PERF_COUNTERS)
 
+#ifdef __riscv
+#define RISCV_BM_PERF
+#endif
+
 #ifdef RISCV_BM_PERF
 
 static inline unsigned long riscv64_arch_cycle(void)
@@ -2388,12 +2392,6 @@ public:
         }
 
 #ifdef RISCV_BM_PERF
-        auto const numBytes = sizeof(uint64_t) * mCounters.size();
-
-        Clock::time_point start;
-        Clock::time_point end = Clock::now();
-        uint64_t time_val = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
         mCounters[0] = 2; // count
         mCounters[1] = 0;
         mCounters[2] = 0;
@@ -2420,12 +2418,6 @@ public:
         }
 
 #ifdef RISCV_BM_PERF
-        auto const numBytes = sizeof(uint64_t) * mCounters.size();
-
-        Clock::time_point start;
-        Clock::time_point end = Clock::now();
-        uint64_t time_val = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
         mCounters[0] = 2; // count
         mCounters[1] = 0;
         mCounters[2] = 0;
@@ -2615,7 +2607,9 @@ bool LinuxPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target t
 
 #ifdef RISCV_BM_PERF
     uint64_t id = 0;
-    
+    if (type != PERF_TYPE_HARDWARE) {
+        return false;
+    }
     switch (eventid) {
         case PERF_COUNT_HW_INSTRUCTIONS:    id = 0; break;
         case PERF_COUNT_HW_REF_CPU_CYCLES:  id = 1; break;
