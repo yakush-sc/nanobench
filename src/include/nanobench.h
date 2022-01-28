@@ -2335,6 +2335,27 @@ void IterationLogic::moveResultTo(std::vector<Result>& results) noexcept {
 
 #    if ANKERL_NANOBENCH(PERF_COUNTERS)
 
+#ifdef __riscv
+#define RISCV_BM_PERF
+#endif
+
+#ifdef RISCV_BM_PERF
+
+static inline unsigned long riscv64_arch_cycle(void)
+{
+    unsigned long res;
+    asm ("csrr %0, cycle" : "=r"(res) :: "memory");
+    return res;
+}
+
+static inline unsigned long riscv64_arch_instret(void)
+{
+    unsigned long res;
+    asm ("csrr %0, instret" : "=r"(res) :: "memory");
+    return res;
+}
+#endif
+
 ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
 class LinuxPerformanceCounters {
 public:
@@ -2370,6 +2391,16 @@ public:
             return;
         }
 
+#ifdef RISCV_BM_PERF
+        mCounters[0] = 2; // count
+        mCounters[1] = 0;
+        mCounters[2] = 0;
+        mCounters[3] = riscv64_arch_instret(); 
+        mCounters[4] = 0;                // instr id
+        mCounters[5] = riscv64_arch_cycle();
+        mCounters[6] = 1;                // cycle id
+        mHasError = false;
+#else
         // NOLINTNEXTLINE(hicpp-signed-bitwise)
         mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
         if (mHasError) {
@@ -2378,6 +2409,7 @@ public:
 
         // NOLINTNEXTLINE(hicpp-signed-bitwise)
         mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+#endif        
     }
 
     inline void endMeasure() {
@@ -2385,6 +2417,16 @@ public:
             return;
         }
 
+#ifdef RISCV_BM_PERF
+        mCounters[0] = 2; // count
+        mCounters[1] = 0;
+        mCounters[2] = 0;
+        mCounters[3] = riscv64_arch_instret() - mCounters[3]; 
+        mCounters[4] = 0; // id
+        mCounters[5] = riscv64_arch_cycle() - mCounters[5];
+        mCounters[6] = 1; // id
+        mHasError = false;
+#else
         // NOLINTNEXTLINE(hicpp-signed-bitwise)
         mHasError = (-1 == ioctl(mFd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP));
         if (mHasError) {
@@ -2394,6 +2436,7 @@ public:
         auto const numBytes = sizeof(uint64_t) * mCounters.size();
         auto ret = read(mFd, mCounters.data(), numBytes);
         mHasError = ret != static_cast<ssize_t>(numBytes);
+#endif
     }
 
     void updateResults(uint64_t numIters);
@@ -2562,6 +2605,18 @@ bool LinuxPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target t
         return false;
     }
 
+#ifdef RISCV_BM_PERF
+    uint64_t id = 0;
+    if (type != PERF_TYPE_HARDWARE) {
+        return false;
+    }
+    switch (eventid) {
+        case PERF_COUNT_HW_INSTRUCTIONS:    id = 0; break;
+        case PERF_COUNT_HW_REF_CPU_CYCLES:  id = 1; break;
+        default: return false;
+    }
+   
+#else
     auto pea = perf_event_attr();
     std::memset(&pea, 0, sizeof(perf_event_attr));
     pea.type = type;
@@ -2596,6 +2651,7 @@ bool LinuxPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target t
         // couldn't get id
         return false;
     }
+#endif
 
     // insert into map, rely on the fact that map's references are constant.
     mIdToTarget.emplace(id, target);
@@ -2614,6 +2670,15 @@ PerformanceCounters::PerformanceCounters()
     , mVal()
     , mHas() {
 
+#ifdef RISCV_BM_PERF
+    mHas.cpuCycles = mPc->monitor(PERF_COUNT_HW_REF_CPU_CYCLES, LinuxPerformanceCounters::Target(&mVal.cpuCycles, true, false));
+    mHas.instructions = mPc->monitor(PERF_COUNT_HW_INSTRUCTIONS, LinuxPerformanceCounters::Target(&mVal.instructions, true, true));
+
+    mHas.pageFaults = false;
+    mHas.contextSwitches = false;
+    mHas.branchInstructions = false;
+    mHas.branchMisses = false;
+#else
     mHas.pageFaults = mPc->monitor(PERF_COUNT_SW_PAGE_FAULTS, LinuxPerformanceCounters::Target(&mVal.pageFaults, true, false));
     mHas.cpuCycles = mPc->monitor(PERF_COUNT_HW_REF_CPU_CYCLES, LinuxPerformanceCounters::Target(&mVal.cpuCycles, true, false));
     mHas.contextSwitches =
@@ -2623,6 +2688,7 @@ PerformanceCounters::PerformanceCounters()
         mPc->monitor(PERF_COUNT_HW_BRANCH_INSTRUCTIONS, LinuxPerformanceCounters::Target(&mVal.branchInstructions, true, false));
     mHas.branchMisses = mPc->monitor(PERF_COUNT_HW_BRANCH_MISSES, LinuxPerformanceCounters::Target(&mVal.branchMisses, true, false));
     // mHas.branchMisses = false;
+#endif
 
     mPc->start();
     mPc->calibrate([] {
@@ -3215,10 +3281,10 @@ std::vector<BigO> Bench::complexityBigO() const {
         return n;
     });
     bigOs.emplace_back("O(log n)", rangeMeasure, [](double n) {
-        return std::log2(n);
+        return log2(n);
     });
     bigOs.emplace_back("O(n log n)", rangeMeasure, [](double n) {
-        return n * std::log2(n);
+        return n * log2(n);
     });
     bigOs.emplace_back("O(n^2)", rangeMeasure, [](double n) {
         return n * n;
