@@ -99,12 +99,6 @@
 #    endif
 #endif
 
-#if defined(__riscv) && !defined(ANKERL_NANOBENCH_DISABLE_PERF_COUNTERS)
-#        undef ANKERL_NANOBENCH_PRIVATE_PERF_COUNTERS
-#        define ANKERL_NANOBENCH_PRIVATE_PERF_COUNTERS() 1
-#        define RISCV_PERF_COUNTERS
-#endif
-
 #if defined(__clang__)
 #    define ANKERL_NANOBENCH_NO_SANITIZE(...) __attribute__((no_sanitize(__VA_ARGS__)))
 #else
@@ -355,6 +349,9 @@ struct PerfCountSet;
 class IterationLogic;
 class PerformanceCounters;
 
+// NOTE: Now TargetPerformanceCounters always is present
+class TargetPerformanceCounters;
+
 #if ANKERL_NANOBENCH(PERF_COUNTERS)
 class LinuxPerformanceCounters;
 #endif
@@ -376,6 +373,7 @@ enum perf_hw_id {
 	/*
 	 * Common hardware events, generalized by the kernel:
 	 */
+    // TODO: support other HW counters;
 	PERF_COUNT_HW_CPU_CYCLES		= 0,
 	PERF_COUNT_HW_INSTRUCTIONS		= 1,
 	// PERF_COUNT_HW_CACHE_REFERENCES		= 2,
@@ -392,23 +390,21 @@ enum perf_hw_id {
 
 
 enum perf_sw_ids {
-	PERF_COUNT_SW_CPU_CLOCK			= 0,
-	PERF_COUNT_SW_TASK_CLOCK		= 1,
-	PERF_COUNT_SW_PAGE_FAULTS		= 2,
-	PERF_COUNT_SW_CONTEXT_SWITCHES		= 3,
-	PERF_COUNT_SW_CPU_MIGRATIONS		= 4,
-	PERF_COUNT_SW_PAGE_FAULTS_MIN		= 5,
-	PERF_COUNT_SW_PAGE_FAULTS_MAJ		= 6,
-	PERF_COUNT_SW_ALIGNMENT_FAULTS		= 7,
-	PERF_COUNT_SW_EMULATION_FAULTS		= 8,
-	PERF_COUNT_SW_DUMMY			= 9,
-	PERF_COUNT_SW_BPF_OUTPUT		= 10,
+    // TODO: support SW counters
+	// PERF_COUNT_SW_CPU_CLOCK			= 0,
+	// PERF_COUNT_SW_TASK_CLOCK		= 1,
+	// PERF_COUNT_SW_PAGE_FAULTS		= 2,
+	// PERF_COUNT_SW_CONTEXT_SWITCHES		= 3,
+	// PERF_COUNT_SW_CPU_MIGRATIONS		= 4,
+	// PERF_COUNT_SW_PAGE_FAULTS_MIN		= 5,
+	// PERF_COUNT_SW_PAGE_FAULTS_MAJ		= 6,
+	// PERF_COUNT_SW_ALIGNMENT_FAULTS		= 7,
+	// PERF_COUNT_SW_EMULATION_FAULTS		= 8,
+	// PERF_COUNT_SW_DUMMY			= 9,
+	// PERF_COUNT_SW_BPF_OUTPUT		= 10,
 
 	PERF_COUNT_SW_MAX,			/* non-ABI */
 };
-
-
-
 
 class RiscvPerformanceCounters;
 #endif
@@ -1110,13 +1106,7 @@ public:
 
 private:
 #if ANKERL_NANOBENCH(PERF_COUNTERS)
-#   if defined(__linux__)
-    LinuxPerformanceCounters* mPc = nullptr;
-#   endif
-
-#   if defined(RISCV_PERF_COUNTERS)
-    RiscvPerformanceCounters* mPc = nullptr;
-#   endif
+    TargetPerformanceCounters *mPc = nullptr;
 #endif
 
     PerfCountSet<uint64_t> mVal{};
@@ -1339,16 +1329,16 @@ void doNotOptimizeAway(T const& val) {
 #           include <sys/ioctl.h>
 #           include <sys/syscall.h>
 #        endif
-#        if defined(RISCV_PERF_COUNTERS)
+// TODO: refactor including log2 func
+#        if (!defined(GLIBC) && defined(__riscv))
 #           include <cmath>
-    // Calculates log2 of number.
-    namespace std {
-        double log2( double n )  
-        {  
-            // log(n)/log(2) is log2.  
-            return log( n ) / log( 2 );  
-        }  
-    }         
+            // Calculates log2 of number.
+            namespace std {
+                double log2( double n ) {  
+                    // log(n)/log(2) is log2.  
+                    return log( n ) / log( 2 );  
+                }  
+            }
 #        endif
 #    endif
 
@@ -2414,25 +2404,8 @@ void IterationLogic::moveResultTo(std::vector<Result>& results) noexcept {
 
 #    if ANKERL_NANOBENCH(PERF_COUNTERS)
 
-#if defined(RISCV_PERF_COUNTERS)
-
-static inline unsigned long arch_cycle(void)
-{
-    unsigned long res;
-    asm ("csrr %0, cycle" : "=r"(res) :: "memory");
-    return res;
-}
-
-static inline unsigned long arch_instret(void)
-{
-    unsigned long res;
-    asm ("csrr %0, instret" : "=r"(res) :: "memory");
-    return res;
-}
-
 ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
-// TODO: refactor to TargetPeformanceCounters
-class RiscvPerformanceCounters {
+class TargetPerformanceCounters {
 public:
     struct Target {
         Target(uint64_t* targetValue_, bool correctMeasuringOverhead_, bool correctLoopOverhead_)
@@ -2444,8 +2417,8 @@ public:
         bool correctMeasuringOverhead{};
         bool correctLoopOverhead{};
     };
-
-    ~RiscvPerformanceCounters();
+    
+    virtual ~TargetPerformanceCounters();
 
     bool monitor(perf_sw_ids swId, Target target);
     bool monitor(perf_hw_id hwId, Target target);
@@ -2458,50 +2431,10 @@ public:
     bool hasError() const noexcept {
         return mHasError;
     }
-    
-    // Just reading data is faster than enable & disabling.
-    // we subtract data ourselves.
-    inline void beginMeasure() {
-        if (mHasError) {
-            return;
-        }
 
-        auto const numBytes = sizeof(uint64_t) * mCounters.size();
 
-        Clock::time_point start;
-        Clock::time_point end = Clock::now();
-        uint64_t time_val = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
-        mCounters[0] = 2; // count
-        mCounters[1] = 0;
-        mCounters[2] = 0;
-        mCounters[3] = arch_instret(); 
-        mCounters[4] = 0;                // instr id
-        mCounters[5] = arch_cycle();
-        mCounters[6] = 1;                // cycle id
-        mHasError = false;
-    }
-
-    inline void endMeasure() {
-        if (mHasError) {
-            return;
-        }
-        
-        auto const numBytes = sizeof(uint64_t) * mCounters.size();
-
-        Clock::time_point start;
-        Clock::time_point end = Clock::now();
-        uint64_t time_val = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
-        mCounters[0] = 2; // count
-        mCounters[1] = 0;
-        mCounters[2] = 0;
-        mCounters[3] = arch_instret() - mCounters[3]; 
-        mCounters[4] = 0; // id
-        mCounters[5] = arch_cycle() - mCounters[5];
-        mCounters[6] = 1; // id
-        mHasError = false;
-    }
+    virtual inline void beginMeasure() {};
+    virtual inline void endMeasure() {};
 
     void updateResults(uint64_t numIters);
 
@@ -2589,9 +2522,8 @@ public:
         }
     }
 
-
-private:
-    bool monitor(uint32_t type, uint64_t eventid, Target target);
+// TODO: Need to modify access security for that members
+    virtual bool monitor(uint32_t type, uint64_t eventid, Target target) = 0;
 
     std::map<uint64_t, Target> mIdToTarget{};
 
@@ -2602,29 +2534,24 @@ private:
 
     uint64_t mTimeEnabledNanos = 0;
     uint64_t mTimeRunningNanos = 0;
-    int mFd = -1;
     bool mHasError = false;
-
 };
 ANKERL_NANOBENCH(IGNORE_PADDED_POP)
 
-RiscvPerformanceCounters::~RiscvPerformanceCounters() {
-    if (-1 != mFd) {
-        close(mFd);
-    }
+TargetPerformanceCounters::~TargetPerformanceCounters() {
 }
 
-bool RiscvPerformanceCounters::monitor(perf_sw_ids swId, RiscvPerformanceCounters::Target target) {
+bool TargetPerformanceCounters::monitor(perf_sw_ids swId, TargetPerformanceCounters::Target target) {
     return monitor(PERF_TYPE_SOFTWARE, swId, target);
 }
 
-bool RiscvPerformanceCounters::monitor(perf_hw_id hwId, RiscvPerformanceCounters::Target target) {
+bool TargetPerformanceCounters::monitor(perf_hw_id hwId, TargetPerformanceCounters::Target target) {
     return monitor(PERF_TYPE_HARDWARE, hwId, target);
 }
 
 // overflow is ok, it's checked
 ANKERL_NANOBENCH_NO_SANITIZE("integer", "undefined")
-void RiscvPerformanceCounters::updateResults(uint64_t numIters) {
+void TargetPerformanceCounters::updateResults(uint64_t numIters) {
 
     // clear old data
     for (auto& id_value : mIdToTarget) {
@@ -2666,14 +2593,84 @@ void RiscvPerformanceCounters::updateResults(uint64_t numIters) {
     }
 }
 
-bool RiscvPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target target) {
+
+#if defined(RISCV_PERF_COUNTERS)
+
+static inline unsigned long arch_cycle(void)
+{
+    unsigned long res;
+    asm ("csrr %0, cycle" : "=r"(res) :: "memory");
+    return res;
+}
+
+static inline unsigned long arch_instret(void)
+{
+    unsigned long res;
+    asm ("csrr %0, instret" : "=r"(res) :: "memory");
+    return res;
+}
+
+
+ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
+class RiscvPerformanceCounters: public TargetPerformanceCounters {
+public:
+
+    ~RiscvPerformanceCounters();
+
+    // NOTE: Previously it was inline function
+    // Just reading data is faster than enable & disabling.
+    // we subtract data ourselves.
+    virtual void beginMeasure() {
+        if (mHasError) {
+            return;
+        }
+
+        mCounters[0] = 2; // count
+        mCounters[1] = 0;
+        mCounters[2] = 0;
+        mCounters[3] = arch_instret(); 
+        mCounters[4] = 0;                // instr id
+        mCounters[5] = arch_cycle();
+        mCounters[6] = 1;                // cycle id
+        mHasError = false;
+    }
+
+    virtual void endMeasure() {
+        if (mHasError) {
+            return;
+        }
+
+        mCounters[0] = 2; // count
+        mCounters[1] = 0;
+        mCounters[2] = 0;
+        mCounters[3] = arch_instret() - mCounters[3]; 
+        mCounters[4] = 0; // id
+        mCounters[5] = arch_cycle() - mCounters[5];
+        mCounters[6] = 1; // id
+        mHasError = false;
+    }
+
+
+    virtual bool monitor(uint32_t type, uint64_t eventid, Target target);
+};
+ANKERL_NANOBENCH(IGNORE_PADDED_POP)
+
+RiscvPerformanceCounters::~RiscvPerformanceCounters() {
+}
+
+
+bool RiscvPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target target){
     *target.targetValue = (std::numeric_limits<uint64_t>::max)();
     if (mHasError) {
         return false;
     }
 
     uint64_t id = 0;
-
+// TODO: handle type
+    switch (type) {
+      default: break;
+    }
+    
     switch (eventid) {
     // TODO: add more eventid handling
         case PERF_COUNT_HW_INSTRUCTIONS:    id = 0; break;
@@ -2696,36 +2693,14 @@ bool RiscvPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target t
 
 #if defined(__linux__)
 ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
-class LinuxPerformanceCounters {
+class LinuxPerformanceCounters : public TargetPerformanceCounters {
 public:
-    struct Target {
-        Target(uint64_t* targetValue_, bool correctMeasuringOverhead_, bool correctLoopOverhead_)
-            : targetValue(targetValue_)
-            , correctMeasuringOverhead(correctMeasuringOverhead_)
-            , correctLoopOverhead(correctLoopOverhead_) {}
-
-        uint64_t* targetValue{};
-        bool correctMeasuringOverhead{};
-        bool correctLoopOverhead{};
-    };
 
     ~LinuxPerformanceCounters();
 
-    // quick operation
-    inline void start() {}
-
-    inline void stop() {}
-
-    bool monitor(perf_sw_ids swId, Target target);
-    bool monitor(perf_hw_id hwId, Target target);
-
-    bool hasError() const noexcept {
-        return mHasError;
-    }
-
     // Just reading data is faster than enable & disabling.
     // we subtract data ourselves.
-    inline void beginMeasure() {
+    virtual void beginMeasure() {
         if (mHasError) {
             return;
         }
@@ -2740,7 +2715,7 @@ public:
         mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
     }
 
-    inline void endMeasure() {
+    virtual void endMeasure() {
         if (mHasError) {
             return;
         }
@@ -2756,163 +2731,16 @@ public:
         mHasError = ret != static_cast<ssize_t>(numBytes);
     }
 
-    void updateResults(uint64_t numIters);
-
-    // rounded integer division
-    template <typename T>
-    static inline T divRounded(T a, T divisor) {
-        return (a + divisor / 2) / divisor;
-    }
-
-    ANKERL_NANOBENCH_NO_SANITIZE("integer", "undefined")
-    static inline uint32_t mix(uint32_t x) noexcept {
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        return x;
-    }
-
-    template <typename Op>
-    ANKERL_NANOBENCH_NO_SANITIZE("integer", "undefined")
-    void calibrate(Op&& op) {
-        // clear current calibration data,
-        for (auto& v : mCalibratedOverhead) {
-            v = UINT64_C(0);
-        }
-
-        // create new calibration data
-        auto newCalibration = mCalibratedOverhead;
-        for (auto& v : newCalibration) {
-            v = (std::numeric_limits<uint64_t>::max)();
-        }
-        for (size_t iter = 0; iter < 100; ++iter) {
-            beginMeasure();
-            op();
-            endMeasure();
-            if (mHasError) {
-                return;
-            }
-
-            for (size_t i = 0; i < newCalibration.size(); ++i) {
-                auto diff = mCounters[i];
-                if (newCalibration[i] > diff) {
-                    newCalibration[i] = diff;
-                }
-            }
-        }
-
-        mCalibratedOverhead = std::move(newCalibration);
-
-        {
-            // calibrate loop overhead. For branches & instructions this makes sense, not so much for everything else like cycles.
-            // marsaglia's xorshift: mov, sal/shr, xor. Times 3.
-            // This has the nice property that the compiler doesn't seem to be able to optimize multiple calls any further.
-            // see https://godbolt.org/z/49RVQ5
-            uint64_t const numIters = 100000U + (std::random_device{}() & 3);
-            uint64_t n = numIters;
-            uint32_t x = 1234567;
-
-            beginMeasure();
-            while (n-- > 0) {
-                x = mix(x);
-            }
-            endMeasure();
-            detail::doNotOptimizeAway(x);
-            auto measure1 = mCounters;
-
-            n = numIters;
-            beginMeasure();
-            while (n-- > 0) {
-                // we now run *twice* so we can easily calculate the overhead
-                x = mix(x);
-                x = mix(x);
-            }
-            endMeasure();
-            detail::doNotOptimizeAway(x);
-            auto measure2 = mCounters;
-
-            for (size_t i = 0; i < mCounters.size(); ++i) {
-                // factor 2 because we have two instructions per loop
-                auto m1 = measure1[i] > mCalibratedOverhead[i] ? measure1[i] - mCalibratedOverhead[i] : 0;
-                auto m2 = measure2[i] > mCalibratedOverhead[i] ? measure2[i] - mCalibratedOverhead[i] : 0;
-                auto overhead = m1 * 2 > m2 ? m1 * 2 - m2 : 0;
-
-                mLoopOverhead[i] = divRounded(overhead, numIters);
-            }
-        }
-    }
-
 private:
     bool monitor(uint32_t type, uint64_t eventid, Target target);
 
-    std::map<uint64_t, Target> mIdToTarget{};
-
-    // start with minimum size of 3 for read_format
-    std::vector<uint64_t> mCounters{3};
-    std::vector<uint64_t> mCalibratedOverhead{3};
-    std::vector<uint64_t> mLoopOverhead{3};
-
-    uint64_t mTimeEnabledNanos = 0;
-    uint64_t mTimeRunningNanos = 0;
     int mFd = -1;
-    bool mHasError = false;
 };
 ANKERL_NANOBENCH(IGNORE_PADDED_POP)
 
 LinuxPerformanceCounters::~LinuxPerformanceCounters() {
     if (-1 != mFd) {
         close(mFd);
-    }
-}
-
-bool LinuxPerformanceCounters::monitor(perf_sw_ids swId, LinuxPerformanceCounters::Target target) {
-    return monitor(PERF_TYPE_SOFTWARE, swId, target);
-}
-
-bool LinuxPerformanceCounters::monitor(perf_hw_id hwId, LinuxPerformanceCounters::Target target) {
-    return monitor(PERF_TYPE_HARDWARE, hwId, target);
-}
-
-// overflow is ok, it's checked
-ANKERL_NANOBENCH_NO_SANITIZE("integer", "undefined")
-void LinuxPerformanceCounters::updateResults(uint64_t numIters) {
-    // clear old data
-    for (auto& id_value : mIdToTarget) {
-        *id_value.second.targetValue = UINT64_C(0);
-    }
-
-    if (mHasError) {
-        return;
-    }
-
-    mTimeEnabledNanos = mCounters[1] - mCalibratedOverhead[1];
-    mTimeRunningNanos = mCounters[2] - mCalibratedOverhead[2];
-
-    for (uint64_t i = 0; i < mCounters[0]; ++i) {
-        auto idx = static_cast<size_t>(3 + i * 2 + 0);
-        auto id = mCounters[idx + 1U];
-
-        auto it = mIdToTarget.find(id);
-        if (it != mIdToTarget.end()) {
-
-            auto& tgt = it->second;
-            *tgt.targetValue = mCounters[idx];
-            if (tgt.correctMeasuringOverhead) {
-                if (*tgt.targetValue >= mCalibratedOverhead[idx]) {
-                    *tgt.targetValue -= mCalibratedOverhead[idx];
-                } else {
-                    *tgt.targetValue = 0U;
-                }
-            }
-            if (tgt.correctLoopOverhead) {
-                auto correctionVal = mLoopOverhead[idx] * numIters;
-                if (*tgt.targetValue >= correctionVal) {
-                    *tgt.targetValue -= correctionVal;
-                } else {
-                    *tgt.targetValue = 0U;
-                }
-            }
-        }
     }
 }
 
@@ -3591,10 +3419,10 @@ std::vector<BigO> Bench::complexityBigO() const {
         return n;
     });
     bigOs.emplace_back("O(log n)", rangeMeasure, [](double n) {
-        return std::log2(n);
+        return log2(n);
     });
     bigOs.emplace_back("O(n log n)", rangeMeasure, [](double n) {
-        return n * std::log2(n);
+        return n * log2(n);
     });
     bigOs.emplace_back("O(n^2)", rangeMeasure, [](double n) {
         return n * n;
