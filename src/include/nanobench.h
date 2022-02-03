@@ -349,8 +349,64 @@ struct PerfCountSet;
 class IterationLogic;
 class PerformanceCounters;
 
+// NOTE: Now TargetPerformanceCounters always is present
+class TargetPerformanceCounters;
+
 #if ANKERL_NANOBENCH(PERF_COUNTERS)
 class LinuxPerformanceCounters;
+#endif
+
+#ifdef RISCV_PERF_COUNTERS
+// perf_event enums
+enum perf_type_id {
+	PERF_TYPE_HARDWARE			= 0,
+	PERF_TYPE_SOFTWARE			= 1,
+	PERF_TYPE_TRACEPOINT			= 2,
+	PERF_TYPE_HW_CACHE			= 3,
+	PERF_TYPE_RAW				= 4,
+	PERF_TYPE_BREAKPOINT			= 5,
+
+	PERF_TYPE_MAX,				/* non-ABI */
+};
+
+enum perf_hw_id {
+	/*
+	 * Common hardware events, generalized by the kernel:
+	 */
+    // TODO: support other HW counters;
+	PERF_COUNT_HW_CPU_CYCLES		= 0,
+	PERF_COUNT_HW_INSTRUCTIONS		= 1,
+	// PERF_COUNT_HW_CACHE_REFERENCES		= 2,
+	// PERF_COUNT_HW_CACHE_MISSES		= 3,
+	// PERF_COUNT_HW_BRANCH_INSTRUCTIONS	= 4,
+	// PERF_COUNT_HW_BRANCH_MISSES		= 5,
+	// PERF_COUNT_HW_BUS_CYCLES		= 6,
+	// PERF_COUNT_HW_STALLED_CYCLES_FRONTEND	= 7,
+	// PERF_COUNT_HW_STALLED_CYCLES_BACKEND	= 8,
+	PERF_COUNT_HW_REF_CPU_CYCLES		= 9,
+
+	PERF_COUNT_HW_MAX,			/* non-ABI */
+};
+
+
+enum perf_sw_ids {
+    // TODO: support SW counters
+	// PERF_COUNT_SW_CPU_CLOCK			= 0,
+	// PERF_COUNT_SW_TASK_CLOCK		= 1,
+	// PERF_COUNT_SW_PAGE_FAULTS		= 2,
+	// PERF_COUNT_SW_CONTEXT_SWITCHES		= 3,
+	// PERF_COUNT_SW_CPU_MIGRATIONS		= 4,
+	// PERF_COUNT_SW_PAGE_FAULTS_MIN		= 5,
+	// PERF_COUNT_SW_PAGE_FAULTS_MAJ		= 6,
+	// PERF_COUNT_SW_ALIGNMENT_FAULTS		= 7,
+	// PERF_COUNT_SW_EMULATION_FAULTS		= 8,
+	// PERF_COUNT_SW_DUMMY			= 9,
+	// PERF_COUNT_SW_BPF_OUTPUT		= 10,
+
+	PERF_COUNT_SW_MAX,			/* non-ABI */
+};
+
+class RiscvPerformanceCounters;
 #endif
 
 } // namespace detail
@@ -1050,8 +1106,9 @@ public:
 
 private:
 #if ANKERL_NANOBENCH(PERF_COUNTERS)
-    LinuxPerformanceCounters* mPc = nullptr;
+    TargetPerformanceCounters *mPc = nullptr;
 #endif
+
     PerfCountSet<uint64_t> mVal{};
     PerfCountSet<bool> mHas{};
 };
@@ -1266,11 +1323,23 @@ void doNotOptimizeAway(T const& val) {
 #    endif
 #    if ANKERL_NANOBENCH(PERF_COUNTERS)
 #        include <map> // map
-
-#        include <linux/perf_event.h>
-#        include <sys/ioctl.h>
-#        include <sys/syscall.h>
 #        include <unistd.h>
+#        if defined(__linux__)
+#           include <linux/perf_event.h>
+#           include <sys/ioctl.h>
+#           include <sys/syscall.h>
+#        endif
+// TODO: refactor including log2 func
+#        if (!defined(GLIBC) && defined(__riscv))
+#           include <cmath>
+            // Calculates log2 of number.
+            namespace std {
+                double log2( double n ) {  
+                    // log(n)/log(2) is log2.  
+                    return log( n ) / log( 2 );  
+                }  
+            }
+#        endif
 #    endif
 
 // declarations ///////////////////////////////////////////////////////////////////////////////////
@@ -2336,7 +2405,7 @@ void IterationLogic::moveResultTo(std::vector<Result>& results) noexcept {
 #    if ANKERL_NANOBENCH(PERF_COUNTERS)
 
 ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
-class LinuxPerformanceCounters {
+class TargetPerformanceCounters {
 public:
     struct Target {
         Target(uint64_t* targetValue_, bool correctMeasuringOverhead_, bool correctLoopOverhead_)
@@ -2348,53 +2417,24 @@ public:
         bool correctMeasuringOverhead{};
         bool correctLoopOverhead{};
     };
+    
+    virtual ~TargetPerformanceCounters();
 
-    ~LinuxPerformanceCounters();
+    bool monitor(perf_sw_ids swId, Target target);
+    bool monitor(perf_hw_id hwId, Target target);
 
     // quick operation
     inline void start() {}
 
     inline void stop() {}
 
-    bool monitor(perf_sw_ids swId, Target target);
-    bool monitor(perf_hw_id hwId, Target target);
-
     bool hasError() const noexcept {
         return mHasError;
     }
 
-    // Just reading data is faster than enable & disabling.
-    // we subtract data ourselves.
-    inline void beginMeasure() {
-        if (mHasError) {
-            return;
-        }
 
-        // NOLINTNEXTLINE(hicpp-signed-bitwise)
-        mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
-        if (mHasError) {
-            return;
-        }
-
-        // NOLINTNEXTLINE(hicpp-signed-bitwise)
-        mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
-    }
-
-    inline void endMeasure() {
-        if (mHasError) {
-            return;
-        }
-
-        // NOLINTNEXTLINE(hicpp-signed-bitwise)
-        mHasError = (-1 == ioctl(mFd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP));
-        if (mHasError) {
-            return;
-        }
-
-        auto const numBytes = sizeof(uint64_t) * mCounters.size();
-        auto ret = read(mFd, mCounters.data(), numBytes);
-        mHasError = ret != static_cast<ssize_t>(numBytes);
-    }
+    virtual inline void beginMeasure() {};
+    virtual inline void endMeasure() {};
 
     void updateResults(uint64_t numIters);
 
@@ -2482,40 +2522,37 @@ public:
         }
     }
 
-private:
-    bool monitor(uint32_t type, uint64_t eventid, Target target);
+// TODO: Need to modify access security for that members
+    virtual bool monitor(uint32_t type, uint64_t eventid, Target target) = 0;
 
     std::map<uint64_t, Target> mIdToTarget{};
 
-    // start with minimum size of 3 for read_format
+    // // start with minimum size of 3 for read_format
     std::vector<uint64_t> mCounters{3};
     std::vector<uint64_t> mCalibratedOverhead{3};
     std::vector<uint64_t> mLoopOverhead{3};
 
     uint64_t mTimeEnabledNanos = 0;
     uint64_t mTimeRunningNanos = 0;
-    int mFd = -1;
     bool mHasError = false;
 };
 ANKERL_NANOBENCH(IGNORE_PADDED_POP)
 
-LinuxPerformanceCounters::~LinuxPerformanceCounters() {
-    if (-1 != mFd) {
-        close(mFd);
-    }
+TargetPerformanceCounters::~TargetPerformanceCounters() {
 }
 
-bool LinuxPerformanceCounters::monitor(perf_sw_ids swId, LinuxPerformanceCounters::Target target) {
+bool TargetPerformanceCounters::monitor(perf_sw_ids swId, TargetPerformanceCounters::Target target) {
     return monitor(PERF_TYPE_SOFTWARE, swId, target);
 }
 
-bool LinuxPerformanceCounters::monitor(perf_hw_id hwId, LinuxPerformanceCounters::Target target) {
+bool TargetPerformanceCounters::monitor(perf_hw_id hwId, TargetPerformanceCounters::Target target) {
     return monitor(PERF_TYPE_HARDWARE, hwId, target);
 }
 
 // overflow is ok, it's checked
 ANKERL_NANOBENCH_NO_SANITIZE("integer", "undefined")
-void LinuxPerformanceCounters::updateResults(uint64_t numIters) {
+void TargetPerformanceCounters::updateResults(uint64_t numIters) {
+
     // clear old data
     for (auto& id_value : mIdToTarget) {
         *id_value.second.targetValue = UINT64_C(0);
@@ -2553,6 +2590,157 @@ void LinuxPerformanceCounters::updateResults(uint64_t numIters) {
                 }
             }
         }
+    }
+}
+
+
+#if defined(RISCV_PERF_COUNTERS)
+
+static inline unsigned long arch_cycle(void)
+{
+    unsigned long res;
+    asm ("csrr %0, cycle" : "=r"(res) :: "memory");
+    return res;
+}
+
+static inline unsigned long arch_instret(void)
+{
+    unsigned long res;
+    asm ("csrr %0, instret" : "=r"(res) :: "memory");
+    return res;
+}
+
+
+ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
+class RiscvPerformanceCounters: public TargetPerformanceCounters {
+public:
+
+    ~RiscvPerformanceCounters();
+
+    // NOTE: Previously it was inline function
+    // Just reading data is faster than enable & disabling.
+    // we subtract data ourselves.
+    virtual void beginMeasure() {
+        if (mHasError) {
+            return;
+        }
+
+        mCounters[0] = 2; // count
+        mCounters[1] = 0;
+        mCounters[2] = 0;
+        mCounters[3] = arch_instret(); 
+        mCounters[4] = 0;                // instr id
+        mCounters[5] = arch_cycle();
+        mCounters[6] = 1;                // cycle id
+        mHasError = false;
+    }
+
+    virtual void endMeasure() {
+        if (mHasError) {
+            return;
+        }
+
+        mCounters[0] = 2; // count
+        mCounters[1] = 0;
+        mCounters[2] = 0;
+        mCounters[3] = arch_instret() - mCounters[3]; 
+        mCounters[4] = 0; // id
+        mCounters[5] = arch_cycle() - mCounters[5];
+        mCounters[6] = 1; // id
+        mHasError = false;
+    }
+
+
+    virtual bool monitor(uint32_t type, uint64_t eventid, Target target);
+};
+ANKERL_NANOBENCH(IGNORE_PADDED_POP)
+
+RiscvPerformanceCounters::~RiscvPerformanceCounters() {
+}
+
+
+bool RiscvPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target target){
+    *target.targetValue = (std::numeric_limits<uint64_t>::max)();
+    if (mHasError) {
+        return false;
+    }
+
+    uint64_t id = 0;
+// TODO: handle type
+    switch (type) {
+      default: break;
+    }
+    
+    switch (eventid) {
+    // TODO: add more eventid handling
+        case PERF_COUNT_HW_INSTRUCTIONS:    id = 0; break;
+        case PERF_COUNT_HW_REF_CPU_CYCLES:  id = 1; break;
+        default: return false;
+    }
+
+    // insert into map, rely on the fact that map's references are constant.
+    mIdToTarget.emplace(id, target);
+
+    // prepare readformat with the correct size (after the insert)
+    auto size = 3 + 2 * mIdToTarget.size();
+    mCounters.resize(size);
+    mCalibratedOverhead.resize(size);
+    mLoopOverhead.resize(size);
+
+    return true;
+}
+#endif //RISCV_PERF_COUNTERS
+
+#if defined(__linux__)
+ANKERL_NANOBENCH(IGNORE_PADDED_PUSH)
+class LinuxPerformanceCounters : public TargetPerformanceCounters {
+public:
+
+    ~LinuxPerformanceCounters();
+
+    // Just reading data is faster than enable & disabling.
+    // we subtract data ourselves.
+    virtual void beginMeasure() {
+        if (mHasError) {
+            return;
+        }
+
+        // NOLINTNEXTLINE(hicpp-signed-bitwise)
+        mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
+        if (mHasError) {
+            return;
+        }
+
+        // NOLINTNEXTLINE(hicpp-signed-bitwise)
+        mHasError = -1 == ioctl(mFd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+    }
+
+    virtual void endMeasure() {
+        if (mHasError) {
+            return;
+        }
+
+        // NOLINTNEXTLINE(hicpp-signed-bitwise)
+        mHasError = (-1 == ioctl(mFd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP));
+        if (mHasError) {
+            return;
+        }
+
+        auto const numBytes = sizeof(uint64_t) * mCounters.size();
+        auto ret = read(mFd, mCounters.data(), numBytes);
+        mHasError = ret != static_cast<ssize_t>(numBytes);
+    }
+
+private:
+    bool monitor(uint32_t type, uint64_t eventid, Target target);
+
+    int mFd = -1;
+};
+ANKERL_NANOBENCH(IGNORE_PADDED_POP)
+
+LinuxPerformanceCounters::~LinuxPerformanceCounters() {
+    if (-1 != mFd) {
+        close(mFd);
     }
 }
 
@@ -2608,12 +2796,27 @@ bool LinuxPerformanceCounters::monitor(uint32_t type, uint64_t eventid, Target t
 
     return true;
 }
+#   endif // LinuxPerformanceCounters
 
 PerformanceCounters::PerformanceCounters()
+#ifdef RISCV_PERF_COUNTERS
+    : mPc(new RiscvPerformanceCounters())
+#else
     : mPc(new LinuxPerformanceCounters())
+#endif
     , mVal()
     , mHas() {
+        
+#ifdef RISCV_PERF_COUNTERS
+    // mHas.cpuCycles = mPc->monitor(PERF_COUNT_HW_REF_CPU_CYCLES, LinuxPerformanceCounters::Target(&mVal.cpuCycles, true, false));
+    mHas.cpuCycles = mPc->monitor(PERF_COUNT_HW_REF_CPU_CYCLES, RiscvPerformanceCounters::Target(&mVal.cpuCycles, true, false));
+    mHas.instructions = mPc->monitor(PERF_COUNT_HW_INSTRUCTIONS, RiscvPerformanceCounters::Target(&mVal.instructions, true, true));
 
+    mHas.pageFaults = false;
+    mHas.contextSwitches = false;
+    mHas.branchInstructions = false;
+    mHas.branchMisses = false;
+#else
     mHas.pageFaults = mPc->monitor(PERF_COUNT_SW_PAGE_FAULTS, LinuxPerformanceCounters::Target(&mVal.pageFaults, true, false));
     mHas.cpuCycles = mPc->monitor(PERF_COUNT_HW_REF_CPU_CYCLES, LinuxPerformanceCounters::Target(&mVal.cpuCycles, true, false));
     mHas.contextSwitches =
@@ -2623,6 +2826,7 @@ PerformanceCounters::PerformanceCounters()
         mPc->monitor(PERF_COUNT_HW_BRANCH_INSTRUCTIONS, LinuxPerformanceCounters::Target(&mVal.branchInstructions, true, false));
     mHas.branchMisses = mPc->monitor(PERF_COUNT_HW_BRANCH_MISSES, LinuxPerformanceCounters::Target(&mVal.branchMisses, true, false));
     // mHas.branchMisses = false;
+#endif
 
     mPc->start();
     mPc->calibrate([] {
@@ -3215,10 +3419,10 @@ std::vector<BigO> Bench::complexityBigO() const {
         return n;
     });
     bigOs.emplace_back("O(log n)", rangeMeasure, [](double n) {
-        return std::log2(n);
+        return log2(n);
     });
     bigOs.emplace_back("O(n log n)", rangeMeasure, [](double n) {
-        return n * std::log2(n);
+        return n * log2(n);
     });
     bigOs.emplace_back("O(n^2)", rangeMeasure, [](double n) {
         return n * n;
